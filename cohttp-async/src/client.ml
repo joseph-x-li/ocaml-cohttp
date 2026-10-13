@@ -40,7 +40,7 @@ module Net = struct
     (Input_channel.create r, w)
 end
 
-let read_response ic =
+let read_response ?stop_when_closed ic =
   Io.Response.read ic >>| function
   | `Eof -> failwith "Connection closed by remote host"
   | `Invalid reason -> failwith reason
@@ -50,7 +50,8 @@ let read_response ic =
           (* Build a response pipe for the body *)
           let reader = Io.Response.make_body_reader res ic in
           let pipe =
-            Body.Private.pipe_of_body Io.Response.read_body_chunk reader
+            Body.Private.pipe_of_body ?stop_when_closed
+              Io.Response.read_body_chunk reader
           in
           (res, pipe)
       | `No ->
@@ -67,7 +68,8 @@ let request ?interrupt ?ssl_config ?uri ?(body = `Empty) req =
           Body.Private.write_body Io.Request.write_body body writer)
         req oc
       >>= fun () ->
-      read_response ic >>| fun (resp, body) ->
+      read_response ~stop_when_closed:true ic >>| fun (resp, body) ->
+      Async_kernel.Gc.add_finalizer_exn body Pipe.close_read;
       don't_wait_for
         ( Pipe.closed body >>= fun () ->
           Deferred.all_unit [ Input_channel.close ic; Writer.close oc ] );

@@ -74,9 +74,15 @@ let handle_client handle_request sock rd wr =
                   (match res_body with
                   | `Empty | `String _ | `Strings _ -> ()
                   | `Pipe stream ->
-                      Deferred.any_unit
-                        [ Writer.close_finished wr; Writer.consumer_left wr ]
-                      >>> fun () -> Pipe.close_read stream);
+                      choose
+                        [
+                          choice (Writer.close_finished wr) (fun () -> `Close);
+                          choice (Writer.consumer_left wr) (fun () -> `Close);
+                          choice (Pipe.closed stream) (fun () -> `Done);
+                        ]
+                      >>> function
+                      | `Close -> Pipe.close_read stream
+                      | `Done -> ());
                   let keep_alive =
                     Http.Request.is_keep_alive req
                     && Http.Response.is_keep_alive res

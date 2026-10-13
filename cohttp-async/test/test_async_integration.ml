@@ -49,6 +49,17 @@ let server =
           Async_unix.Writer.write oc "8\r\nexpert 2\r\n0\r\n\r\n";
           Async_unix.Writer.flushed oc >>= fun () -> Async_unix.Reader.close ic);
     ]
+  (* pipelined piped responses *)
+  @ (response_bodies
+    |> List.map ~f:(fun s _ _ ->
+           Server.respond_with_pipe (Pipe.of_list [ s; s ]) >>| response))
+  (* discarded large chunked response *)
+  @ [
+      (fun _ _ ->
+        Server.respond_with_pipe
+          (Pipe.of_list (List.init 16 ~f:(fun _ -> chunk chunk_size)))
+        >>| response);
+    ]
   |> response_sequence
 
 let ts =
@@ -101,6 +112,25 @@ let ts =
         Body.to_string body >>| fun body ->
         assert_equal ~printer "expert 2" body
       in
+      let pipelined_pipes () =
+        let printer x = x in
+        let reqs =
+          List.map response_bodies ~f:(fun _ -> (Request.make uri, `Empty))
+        in
+        let body_q = response_bodies |> Queue.of_list in
+        reqs |> Pipe.of_list |> Client.callv uri >>= fun responses ->
+        responses
+        |> Pipe.iter ~f:(fun (_resp, body) ->
+               let s = Queue.dequeue_exn body_q in
+               body |> Body.to_string >>| fun body ->
+               assert_equal ~printer (s ^ s) body)
+        >>| fun () -> assert_equal 0 (Queue.length body_q)
+      in
+      let discard_large_response () =
+        Client.get ~headers uri >>= fun (_resp, body) ->
+        (match body with `Pipe p -> Pipe.close_read p | _ -> ());
+        Async_unix.after (Core.Time_float.Span.of_sec 0.1)
+      in
       [
         ("empty chunk test", empty_chunk);
         ("large response", large_response);
@@ -108,6 +138,8 @@ let ts =
         ("pipelined chunk test", pipelined_chunk);
         ("large chunked response", large_chunked_response);
         ("expert response", expert_pipelined);
+        ("pipelined piped responses", pipelined_pipes);
+        ("discard large response", discard_large_response);
       ])
 
 let () =

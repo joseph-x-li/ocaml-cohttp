@@ -19,7 +19,10 @@ module Private : sig
     ('a -> string -> unit Deferred.t) -> t -> 'a -> unit Deferred.t
 
   val pipe_of_body :
-    ('a -> Cohttp.Transfer.chunk Deferred.t) -> 'a -> string Pipe.Reader.t
+    ?stop_when_closed:bool ->
+    ('a -> Cohttp.Transfer.chunk Deferred.t) ->
+    'a ->
+    string Pipe.Reader.t
 
   val disable_chunked_encoding : t -> (t * int64) Deferred.t
   val drain : t -> unit Deferred.t

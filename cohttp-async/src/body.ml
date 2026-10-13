@@ -59,26 +59,38 @@ let write_body write_body (body : t) writer =
   | `Strings sl -> Deferred.List.iter ~how:`Sequential sl ~f:(write_body writer)
   | `Pipe p -> Pipe.iter p ~f:(write_body writer)
 
-let pipe_of_body read_chunk ic =
+let pipe_of_body ?(stop_when_closed = false) read_chunk ic =
   Pipe.create_reader ~close_on_exception:false (fun writer ->
-      Deferred.repeat_until_finished () (fun () ->
-          read_chunk ic >>= function
-          | Cohttp.Transfer.Chunk buf ->
-              (* Even if [writer] has been closed, the loop must continue reading
-               * from the input channel to ensure that it is left in a proper state
-               * for the next request to be processed (in the case of keep-alive).
-               *
-               * The only case where [writer] will be closed is when
-               * [Pipe.close_read] has been called on its read end. This could be
-               * done by a request handler to signal that it does not need to
-               * inspect the remainder of the body to fulfill the request.
-               *)
-              Pipe.write_when_ready writer ~f:(fun write -> write buf)
-              >>| fun _ -> `Repeat ()
-          | Final_chunk buf ->
-              Pipe.write_when_ready writer ~f:(fun write -> write buf)
-              >>| fun _ -> `Finished ()
-          | Done -> return (`Finished ())))
+      let read_body () =
+        Deferred.repeat_until_finished () (fun () ->
+            match stop_when_closed && Pipe.is_closed writer with
+            | true -> return (`Finished ())
+            | false -> (
+                read_chunk ic >>= function
+                | Cohttp.Transfer.Chunk buf ->
+                    (* Even if [writer] has been closed, the loop must continue reading
+                     * from the input channel to ensure that it is left in a proper state
+                     * for the next request to be processed (in the case of keep-alive).
+                     *
+                     * The only case where [writer] will be closed is when
+                     * [Pipe.close_read] has been called on its read end. This could be
+                     * done by a request handler to signal that it does not need to
+                     * inspect the remainder of the body to fulfill the request.
+                     *)
+                    Pipe.write_when_ready writer ~f:(fun write -> write buf)
+                    >>| fun _ -> `Repeat ()
+                | Final_chunk buf ->
+                    Pipe.write_when_ready writer ~f:(fun write -> write buf)
+                    >>| fun _ -> `Finished ()
+                | Done -> return (`Finished ())))
+      in
+      match stop_when_closed with
+      | false -> read_body ()
+      | true -> (
+          Monitor.try_with ~run:`Now ~rest:`Log read_body >>| function
+          | Ok () -> ()
+          | Error _ when Pipe.is_closed writer -> ()
+          | Error exn -> raise exn))
 
 module Private = struct
   let write_body = write_body
